@@ -3,7 +3,6 @@ using QBitNinja.Client;
 using Microsoft.EntityFrameworkCore;
 using Wallet.Domain.Entities.ViewModel;
 using Wallet.Infrastructure.Context;
-using Transaction = NBitcoin.Transaction;
 
 namespace Wallet.Infrastructure.Repositories
 {
@@ -17,54 +16,40 @@ namespace Wallet.Infrastructure.Repositories
             _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
             _client = new QBitNinjaClient(Network.TestNet);
         }
-
         public async Task SendTransactionAsync(string walletName, string senderAddress, decimal amountToSend, string recipientAddress)
         {
-            var transaction = new Transaction();
-
-            var addressToSend = BitcoinAddress.Create(recipientAddress, Network.TestNet);
-
-            transaction.Outputs.Add(new TxOut
+            var outpointToSpend = await GetOutpointToSpend(walletName, senderAddress);
+            if (outpointToSpend == null)
             {
-                Value = new Money(amountToSend, MoneyUnit.BTC),
-                ScriptPubKey = addressToSend.ScriptPubKey
-            });
+                throw new InvalidOperationException("No available UTXO to spend.");
+            }
 
-            var changeAmount = 0.0001m;
-            var senderAddressObj = BitcoinAddress.Create(senderAddress, Network.TestNet);
-            transaction.Outputs.Add(new TxOut
+            var senderPrivateKey = new BitcoinSecret("cRbhkRRTxk11nnAYhSyuQDr6kvqnFEtmZM7woaGzSSzKeT7WYmcb", Network.TestNet);
+            var builder = Network.TestNet.CreateTransactionBuilder();
+            var recipient = BitcoinAddress.Create(recipientAddress, Network.TestNet);
+
+            var senderBalance = await GetSenderBalance(senderAddress);
+            if (senderBalance < amountToSend + 0.0001m)
             {
-                Value = new Money(changeAmount, MoneyUnit.BTC),
-                ScriptPubKey = senderAddressObj.ScriptPubKey
-            });
+                throw new InvalidOperationException("Insufficient funds to cover the transaction and fees.");
+            }
 
-            var bitcoinPrivateKey = new BitcoinSecret("your_private_key_here", Network.TestNet);
+           
+            var tx = builder
+                .AddCoins(new Coin(outpointToSpend, new TxOut(new Money(amountToSend, MoneyUnit.BTC), senderPrivateKey.PubKey.Hash.ScriptPubKey)))
+                .AddKeys(senderPrivateKey)
+                .Send(recipient, new Money(amountToSend, MoneyUnit.BTC))
+                .SetChange(senderPrivateKey.PubKey.GetAddress(ScriptPubKeyType.Segwit, Network.TestNet))
+                .SendFees(Money.Coins(0.0001m)) 
+                .BuildTransaction(true);
 
-          
-            var prevOutHash = uint256.Parse("previous_transaction_hash_here");
-            var prevOutIndex = 0; 
-            var outpoint = new OutPoint(prevOutHash, prevOutIndex);
-
-            // Add the input to the transaction
-            transaction.Inputs.Add(new TxIn { PrevOut = outpoint });
-
-            // Sign the transaction
-            var coin = new Coin(outpoint, transaction.Outputs[0]); // Assuming you are spending from the first output
-            transaction.Sign(bitcoinPrivateKey, new[] { coin });
-
-            // Broadcast the transaction
-            var broadcastResponse = await _client.Broadcast(transaction);
-
-            // Check if the transaction was successfully broadcasted
+            var broadcastResponse = await _client.Broadcast(tx);
             if (!broadcastResponse.Success)
             {
                 throw new Exception($"Transaction failed to send: {broadcastResponse.Error.Reason}");
             }
 
-            // Get the transaction ID
-            var transactionId = transaction.GetHash().ToString();
-
-            // Create and save a record of the transaction
+            var transactionId = tx.GetHash().ToString();
             var transactionRecord = new Domain.Entities.Models.Transaction
             {
                 Id = transactionId,
@@ -76,8 +61,43 @@ namespace Wallet.Infrastructure.Repositories
                 CreateUserId = "UserId"
             };
 
-            // Add the transaction record to the database
             await _dbContext.Set<Domain.Entities.Models.Transaction>().AddAsync(transactionRecord);
+            await _dbContext.SaveChangesAsync();
+
+            await UpdateBalancesAsync(senderAddress, recipientAddress, amountToSend);
+        }
+
+        private async Task<decimal> GetSenderBalance(string senderAddress)
+        {
+            var senderAddressEntity = await _dbContext.Set<Domain.Entities.Models.Address>()
+                .FirstOrDefaultAsync(a => a.AddressValue == senderAddress);
+
+            if (senderAddressEntity == null)
+            {
+                throw new InvalidOperationException("Sender address not found.");
+            }
+
+            return senderAddressEntity.Balance;
+        }
+
+        private async Task UpdateBalancesAsync(string senderAddress, string recipientAddress, decimal amountToSend)
+        {
+            var senderAddressEntity = await _dbContext.Set<Domain.Entities.Models.Address>()
+                .FirstOrDefaultAsync(a => a.AddressValue == senderAddress);
+
+            if (senderAddressEntity != null)
+            {
+                senderAddressEntity.Balance -= amountToSend;
+            }
+
+            var recipientAddressEntity = await _dbContext.Set<Domain.Entities.Models.Address>()
+                .FirstOrDefaultAsync(a => a.AddressValue == recipientAddress);
+
+            if (recipientAddressEntity != null)
+            {
+                recipientAddressEntity.Balance += amountToSend;
+            }
+
             await _dbContext.SaveChangesAsync();
         }
 
@@ -102,6 +122,27 @@ namespace Wallet.Infrastructure.Repositories
             }
 
             return historyList;
+        }
+
+        private async Task<OutPoint> GetOutpointToSpend(string walletName, string senderAddress)
+        {
+            var wallet = await _dbContext.Set<Domain.Entities.Models.Wallet>().FirstOrDefaultAsync(w => w.WalletName == walletName)
+                           ?? throw new InvalidOperationException("Wallet not found.");
+
+            var senderAddressEntity = await _dbContext.Set<Domain.Entities.Models.Address>()
+                .FirstOrDefaultAsync(a => a.WalletId == wallet.Id && a.AddressValue == senderAddress)
+                           ?? throw new InvalidOperationException("Sender address not found for this wallet.");
+
+            var transactions = await _dbContext.Set<Domain.Entities.Models.Transaction>()
+                .Where(t => t.AddressId == senderAddressEntity.Id).ToListAsync();
+
+            if (!transactions.Any())
+            {
+               return new OutPoint(uint256.Zero, 0);
+            }
+
+            var latestTransaction = transactions.OrderByDescending(t => t.CreateDate).FirstOrDefault();
+            return new OutPoint(uint256.Parse(latestTransaction.Id), 0);
         }
     }
 }

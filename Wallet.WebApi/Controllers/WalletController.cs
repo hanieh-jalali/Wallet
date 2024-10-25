@@ -15,7 +15,7 @@ namespace Wallet.WebApi.Controllers
         public WalletController(IWalletRepository walletRepository, IConfiguration configuration)
         {
             _walletRepository = walletRepository;
-            _walletFilePath = configuration["WalletFilePath"] ?? "default_wallet_path/";
+            _walletFilePath = configuration["WalletFilePath"];
         }
 
         [HttpPost("create")]

@@ -11,6 +11,7 @@ namespace Wallet.Domain.Entities.Models
         public string WalletId { get; set; }
         public string AddressValue { get; set; }
         public bool IsUsed { get; set; }
+        public decimal Balance { get; set; }
         public List<Transaction> Transactions { get; set; }
         public Address()
         {
@@ -21,6 +22,7 @@ namespace Wallet.Domain.Entities.Models
             WalletId = walletId;
             AddressValue = addressValue;
             IsUsed = false;
+            Balance = 0;
             Transactions = new List<Transaction>();
         }
     }

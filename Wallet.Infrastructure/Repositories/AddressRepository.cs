@@ -29,7 +29,7 @@ namespace Wallet.Infrastructure.Repositories
                 throw new ArgumentException("Wallet not found.");
             }
             var key = new Key();
-            var address = key.PubKey.GetAddress(Network.Main);
+            var address = key.PubKey.GetAddress(ScriptPubKeyType.Segwit, Network.TestNet);
 
             var addressInfo = new Address
             {
@@ -38,7 +38,8 @@ namespace Wallet.Infrastructure.Repositories
                 IsUsed = false,
                 CreateUserId = "UserId",
                 CreateDate = DateTime.UtcNow,
-                LastUpdated = DateTime.UtcNow
+                LastUpdated = DateTime.UtcNow,
+                Balance = 0
             };
 
             await _dbContext.Set<Address>().AddAsync(addressInfo);
